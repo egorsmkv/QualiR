@@ -266,17 +266,6 @@ The code match is case-insensitive, and multiple codes can be separated by space
 
 Use `--min-severity warning` to hide info-level smells, or `--min-severity critical` to only see the worst.
 
-## CI Integration
-
-```yaml
-# GitHub Actions example
-- name: Code smell analysis
-  run: |
-    cargo run --release -- --quiet --min-severity warning .
-```
-
-The tool exits with code **1** when any critical smell is detected, making it a natural CI gate.
-
 ## Example Output
 
 ```
@@ -286,14 +275,20 @@ QualiRS — Rust Code Smell Detector
   → 32 files analyzed, 8 smell(s) detected
     0 critical  2 warning  6 info
 
-┌──────────┬────────────────┬──────────────────────┬──────────────────────┬───────────────────────────────────────────┐
-│ Severity │ Category       │ Smell                │ Location             │ Message                                   │
-╞══════════╪════════════════╪══════════════════════╪══════════════════════╪═══════════════════════════════════════════╡
-│ WARN     │ Implementation │ Long Function        │ src/main.rs:12       │ Function `main` is ~58 lines long         │
-│ WARN     │ Implementation │ Long Function        │ src/detectors/...    │ Function `check_generics` is ~53 lines    │
-│ INFO     │ Design         │ Anemic Struct        │ src/domain/smell.rs  │ Struct `SourceLocation` has no impl block  │
-│ INFO     │ Architecture   │ Public API Explosion │ src/detectors/...    │ 100% of items are pub (7/7)               │
-└──────────┴────────────────┴──────────────────────┴──────────────────────┴───────────────────────────────────────────┘
+▸ Architecture
+  INFO Q0005 Public API Explosion src/detectors/mod.rs:1
+    Module exposes a high ratio of public items (7/7)
+
+▸ Design
+  INFO Q0016 Anemic Struct src/domain/smell.rs:30
+    Struct `SourceLocation` has fields but no impl block in this file
+
+▸ Implementation
+  WARN Q0017 Long Function src/main.rs:12
+    Function `main` is ~58 lines long (threshold: 50)
+  WARN Q0017 Long Function src/detectors/generics.rs:44
+    Function `check_generics` is ~53 lines long (threshold: 50)
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Found 8 smell(s). Review warnings above.
 ```
@@ -318,37 +313,6 @@ QualiRS follows a clean layered architecture with strict dependency direction:
 
   Dependencies flow inward only.
   No outer layer is referenced by inner layers.
-```
-
-### Project Structure
-
-```
-src/
-├── main.rs                          Entry point and command dispatch
-├── domain/                          Core data structures and config
-│   ├── smell.rs                     Smell, SmellCategory, Severity, SourceLocation
-│   ├── config.rs                    Config, Thresholds, PolicyConfig
-│   └── source.rs                    SourceFile (syn::File + metadata)
-├── analysis/                        Analysis framework
-│   ├── detector.rs                  Detector trait (the core abstraction)
-│   ├── engine.rs                    Engine: registers, filters, runs detectors
-│   └── visitor.rs                   AST visitor utilities
-├── detectors/                       All smell detectors, organized by category
-│   ├── architecture/
-│   ├── design/
-│   ├── implementation/
-│   ├── concurrency/
-│   ├── unsafe/
-│   ├── mod.rs
-│   └── policy.rs                    Shared detector suppression policy
-├── infrastructure/                  IO-bound adapters
-│   └── walker.rs                    RustFileWalker (ignore crate)
-└── cli/                             Presentation layer
-    ├── args.rs                      CLI argument definitions (clap derive)
-    ├── detector_list.rs             `--list-detectors`
-    ├── json_output.rs               `--format json`
-    ├── llm_snippet.rs               Source snippets for LLM mode
-    └── output.rs                    Compact, table, and LLM report formatting
 ```
 
 ### Writing a Custom Detector
@@ -413,21 +377,6 @@ self.register(Box::new(MyCustomDetector));
 | Unsafe analysis | Basic (`unsafe_removed_from_code`) | SAFETY comment enforcement |
 | Structural metrics | None | LOC, CC, item count, pub ratio, nesting depth, method chains, lifetimes |
 | Overlap | Minimal | Complementary |
-
-## Tech Stack
-
-| Component | Crate | Purpose |
-|---|---|---|
-| AST Parsing | `syn` 2.x | Full Rust syntax tree |
-| Span Locations | `proc-macro2` | Line/column tracking |
-| AST Visitor | `syn::visit` | Recursive tree traversal |
-| CLI | `clap` 4.x | Argument parsing |
-| Terminal Output | `comfy-table` 7.x | Formatted tables |
-| Terminal Colors | `colored` 3.x | ANSI color formatting |
-| Config | `serde` + `toml` | TOML deserialization |
-| File Discovery | `ignore` 0.4 | .gitignore-aware walking |
-| Parallelism | `rayon` 1.x | Parallel file analysis |
-| Error Handling | `anyhow` + `thiserror` | CLI + domain errors |
 
 ## License
 
