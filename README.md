@@ -9,7 +9,7 @@ QualiRS parses your Rust source code with AST analysis and detects structural co
 - 96 built-in smell detectors across 7 categories
 - Parallel analysis via rayon, with configurable thread count
 - Configurable thresholds via `qualirs.toml`
-- Stable `Q0001`-style finding codes with config-based ignores
+- Stable `Q0001`-style finding codes with config-based and inline ignores
 - False-positive policy controls for tests, DTOs, templates, and config structs
 - Compact terminal output by default, with table, LLM, quiet, and JSON modes
 - CI-friendly: exits with code 1 on critical smells
@@ -246,6 +246,15 @@ data_carrier_struct_suffixes = [
 Policy settings control broad false-positive suppression. Set `skip_tests = false` to analyze tests with the same rules as production code. Set `skip_data_carrier_structs = false` or edit `data_carrier_struct_suffixes` if DTO/config/view structs should be checked by design detectors.
 
 Each detector emits a stable `QNNNN` code in terminal and JSON output. Add codes to `ignore_findings` to suppress every matching finding, for example `ignore_findings = ["Q0001", "Q0011"]`. Run `qualirs --list-detectors` to see the full code list.
+
+To suppress a single finding inline, put a QualiRS ignore comment on the line immediately before the reported source line:
+
+```rust
+// qualirs:ignore Q0068
+let _ = fallible_operation();
+```
+
+The code match is case-insensitive, and multiple codes can be separated by spaces or commas. Use `// qualirs:ignore` without codes to suppress any QualiRS finding on the next line.
 
 ## Severity Levels
 
