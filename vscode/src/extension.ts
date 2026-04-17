@@ -42,17 +42,17 @@ interface RunResult {
     exitCode: number | null;
 }
 
-const diagnosticSource = "QualiRS";
+const diagnosticSource = "qualirs";
 const diagnosticCollection = vscode.languages.createDiagnosticCollection("qualirs");
 let statusBarItem: vscode.StatusBarItem;
 let outputChannel: vscode.OutputChannel;
 const timers = new Map<string, NodeJS.Timeout>();
 
 export function activate(context: vscode.ExtensionContext): void {
-    outputChannel = vscode.window.createOutputChannel("QualiRS", "log");
+    outputChannel = vscode.window.createOutputChannel("qualirs", "log");
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
     statusBarItem.command = "qualirs.showOutput";
-    statusBarItem.name = "QualiRS";
+    statusBarItem.name = "qualirs";
     context.subscriptions.push(outputChannel, statusBarItem, diagnosticCollection);
 
     context.subscriptions.push(
@@ -60,31 +60,57 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand("qualirs.checkWorkspace", () => checkWorkspace(context, true)),
         vscode.commands.registerCommand("qualirs.initConfig", () => initConfig(context)),
         vscode.commands.registerCommand("qualirs.showOutput", () => outputChannel.show()),
+        vscode.commands.registerCommand("qualirs.pause", () => setPaused(true)),
+        vscode.commands.registerCommand("qualirs.resume", () => setPaused(false)),
+        vscode.commands.registerCommand("qualirs.togglePause", () => setPaused(!isPaused())),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            runOnOpenedRustRepository(context);
+        }),
         vscode.workspace.onDidSaveTextDocument((document) => {
-            if (isRustDocument(document) && getConfig().get<boolean>("runOnSave", true)) {
+            if (!isPaused() && isRustDocument(document) && getConfig().get<boolean>("runOnSave", true)) {
                 scheduleCheck(context, document);
             }
         }),
         vscode.workspace.onDidOpenTextDocument((document) => {
-            if (isRustDocument(document) && getConfig().get<boolean>("runOnOpen", true)) {
+            if (!isPaused() && isRustDocument(document) && getConfig().get<boolean>("runOnOpen", true)) {
                 scheduleCheck(context, document);
             }
         }),
         vscode.window.onDidChangeActiveTextEditor((editor) => {
+            if (isPaused()) {
+                updateStatusText("paused");
+                return;
+            }
             if (editor && isRustDocument(editor.document)) {
-                updateStatusFromDiagnostics(editor.document.uri);
+                if (isWorkspaceDocument(editor.document)) {
+                    updateStatusFromDiagnostics(editor.document.uri);
+                } else {
+                    updateStatusText(undefined);
+                }
+            } else {
+                updateStatusText(undefined);
             }
         }),
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration("qualirs")) {
                 updateStatusVisibility();
+                if (isPaused()) {
+                    clearScheduledChecks();
+                    diagnosticCollection.clear();
+                    updateStatusText("paused");
+                    return;
+                }
                 void checkActiveFile(context, false);
             }
         })
     );
 
     updateStatusVisibility();
-    if (vscode.window.activeTextEditor && isRustDocument(vscode.window.activeTextEditor.document)) {
+    if (isPaused()) {
+        updateStatusText("paused");
+    } else if (runOnOpenedRustRepository(context)) {
+        return;
+    } else if (vscode.window.activeTextEditor && isRustDocument(vscode.window.activeTextEditor.document)) {
         void checkActiveFile(context, false);
     } else {
         updateStatusText(undefined);
@@ -96,9 +122,26 @@ export function deactivate(): void {
 }
 
 async function checkActiveFile(context: vscode.ExtensionContext, revealOutputOnError: boolean): Promise<void> {
+    if (isPaused()) {
+        updateStatusText("paused");
+        if (revealOutputOnError) {
+            void vscode.window.showInformationMessage("qualirs is paused. Run `qualirs: Resume` to enable analysis.");
+        }
+        return;
+    }
+
     const editor = vscode.window.activeTextEditor;
     if (!editor || !isRustDocument(editor.document)) {
         updateStatusText(undefined);
+        return;
+    }
+
+    if (!isWorkspaceDocument(editor.document)) {
+        diagnosticCollection.delete(editor.document.uri);
+        updateStatusText(undefined);
+        if (revealOutputOnError) {
+            void vscode.window.showWarningMessage("qualirs only checks Rust files inside the opened workspace.");
+        }
         return;
     }
 
@@ -106,13 +149,35 @@ async function checkActiveFile(context: vscode.ExtensionContext, revealOutputOnE
 }
 
 async function checkWorkspace(context: vscode.ExtensionContext, revealOutputOnError: boolean): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (isPaused()) {
+        updateStatusText("paused");
+        if (revealOutputOnError) {
+            void vscode.window.showInformationMessage("qualirs is paused. Run `qualirs: Resume` to enable analysis.");
+        }
+        return;
+    }
+
+    const workspaceFolder = findRustWorkspaceFolder() ?? vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
-        void vscode.window.showWarningMessage("QualiRS needs an open workspace to check the workspace.");
+        void vscode.window.showWarningMessage("qualirs needs an open workspace to check the workspace.");
         return;
     }
 
     await runQualirs(context, workspaceFolder.uri.fsPath, workspaceFolder, revealOutputOnError);
+}
+
+function runOnOpenedRustRepository(context: vscode.ExtensionContext): boolean {
+    if (isPaused() || !getConfig().get<boolean>("runOnWorkspaceOpen", true)) {
+        return false;
+    }
+
+    const workspaceFolder = findRustWorkspaceFolder();
+    if (!workspaceFolder) {
+        return false;
+    }
+
+    void runQualirs(context, workspaceFolder.uri.fsPath, workspaceFolder, false);
+    return true;
 }
 
 async function checkDocument(
@@ -120,7 +185,19 @@ async function checkDocument(
     document: vscode.TextDocument,
     revealOutputOnError: boolean
 ): Promise<void> {
+    if (isPaused()) {
+        updateStatusText("paused");
+        return;
+    }
+
     if (document.isUntitled) {
+        return;
+    }
+
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!workspaceFolder) {
+        diagnosticCollection.delete(document.uri);
+        updateStatusText(undefined);
         return;
     }
 
@@ -128,11 +205,20 @@ async function checkDocument(
         await document.save();
     }
 
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
     await runQualirs(context, document.uri.fsPath, workspaceFolder, revealOutputOnError, document.uri);
 }
 
 function scheduleCheck(context: vscode.ExtensionContext, document: vscode.TextDocument): void {
+    if (isPaused()) {
+        updateStatusText("paused");
+        return;
+    }
+
+    if (!isWorkspaceDocument(document)) {
+        diagnosticCollection.delete(document.uri);
+        return;
+    }
+
     const key = document.uri.toString();
     const existing = timers.get(key);
     if (existing) {
@@ -155,10 +241,15 @@ async function runQualirs(
     revealOutputOnError: boolean,
     focusedDocument?: vscode.Uri
 ): Promise<void> {
+    if (isPaused()) {
+        updateStatusText("paused");
+        return;
+    }
+
     updateStatusText("checking");
     const executable = resolveExecutable(context);
     if (!executable) {
-        const message = "QualiRS executable was not found. Set qualirs.executablePath or package the extension with npm run package:vsix.";
+        const message = "qualirs executable was not found. Set qualirs.executablePath or package the extension with npm run package:vsix.";
         outputChannel.appendLine(message);
         updateStatusText("error");
         if (revealOutputOnError) {
@@ -179,6 +270,12 @@ async function runQualirs(
             outputChannel.appendLine(result.stderr.trimEnd());
         }
 
+        if (isPaused()) {
+            diagnosticCollection.clear();
+            updateStatusText("paused");
+            return;
+        }
+
         applyReport(result.report, focusedDocument, workspaceFolder);
         updateStatusFromReport(result.report);
     } catch (error) {
@@ -191,7 +288,7 @@ async function runQualirs(
         if (revealOutputOnError) {
             outputChannel.show(true);
         }
-        void vscode.window.showErrorMessage(`QualiRS failed: ${message}`);
+        void vscode.window.showErrorMessage(`qualirs failed: ${message}`);
     }
 }
 
@@ -347,7 +444,7 @@ function diagnosticForFinding(finding: QualirsFinding): vscode.Diagnostic {
     const column = Math.max((finding.location?.column ?? 1) - 1, 0);
     const range = new vscode.Range(lineStart, column, lineEnd, column + 1);
     const code = finding.code ?? "Q0000";
-    const name = finding.name ?? "QualiRS finding";
+    const name = finding.name ?? "qualirs finding";
     const message = finding.suggestion
         ? `${name}: ${finding.message ?? ""}\n${finding.suggestion}`
         : `${name}: ${finding.message ?? ""}`;
@@ -359,13 +456,17 @@ function diagnosticForFinding(finding: QualirsFinding): vscode.Diagnostic {
 
 function uriForFinding(finding: QualirsFinding, workspaceFolder: vscode.WorkspaceFolder | undefined): vscode.Uri | undefined {
     const file = finding.location?.file;
-    if (!file) {
+    if (!file || !workspaceFolder) {
         return undefined;
     }
 
     const absolute = path.isAbsolute(file)
-        ? file
-        : path.resolve(workspaceFolder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(), file);
+        ? path.resolve(file)
+        : path.resolve(workspaceFolder.uri.fsPath, file);
+    if (!isPathInsideOrEqual(absolute, workspaceFolder.uri.fsPath)) {
+        return undefined;
+    }
+
     return vscode.Uri.file(absolute);
 }
 
@@ -437,17 +538,27 @@ function executeConfigInit(executable: string, target: string, cwd: string): Pro
 }
 
 function updateStatusFromReport(report: QualirsReport): void {
+    if (isPaused()) {
+        updateStatusText("paused");
+        return;
+    }
+
     const counts = report.summary?.severity_counts;
     const critical = counts?.critical ?? 0;
     const warning = counts?.warning ?? 0;
     const info = counts?.info ?? 0;
     const total = report.summary?.findings ?? critical + warning + info;
 
-    statusBarItem.text = total === 0 ? "$(check) QualiRS" : `$(warning) QualiRS ${total}`;
-    statusBarItem.tooltip = `QualiRS: ${critical} critical, ${warning} warning, ${info} info`;
+    statusBarItem.text = total === 0 ? "$(check) qualirs" : `$(warning) qualirs ${total}`;
+    statusBarItem.tooltip = `qualirs: ${critical} critical, ${warning} warning, ${info} info`;
 }
 
 function updateStatusFromDiagnostics(uri: vscode.Uri): void {
+    if (isPaused()) {
+        updateStatusText("paused");
+        return;
+    }
+
     const diagnostics = diagnosticCollection.get(uri) ?? [];
     const critical = diagnostics.filter((diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error).length;
     const warning = diagnostics.filter((diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Warning).length;
@@ -460,16 +571,19 @@ function updateStatusFromDiagnostics(uri: vscode.Uri): void {
     });
 }
 
-function updateStatusText(state: "checking" | "error" | undefined): void {
+function updateStatusText(state: "checking" | "error" | "paused" | undefined): void {
     if (state === "checking") {
-        statusBarItem.text = "$(sync~spin) QualiRS";
-        statusBarItem.tooltip = "QualiRS is checking this Rust file.";
+        statusBarItem.text = "$(sync~spin) qualirs";
+        statusBarItem.tooltip = "qualirs is checking this Rust file.";
     } else if (state === "error") {
-        statusBarItem.text = "$(error) QualiRS";
-        statusBarItem.tooltip = "QualiRS failed. Open the QualiRS output channel for details.";
+        statusBarItem.text = "$(error) qualirs";
+        statusBarItem.tooltip = "qualirs failed. Open the qualirs output channel for details.";
+    } else if (state === "paused") {
+        statusBarItem.text = "$(debug-pause) qualirs";
+        statusBarItem.tooltip = "qualirs is paused.";
     } else {
-        statusBarItem.text = "$(search) QualiRS";
-        statusBarItem.tooltip = "QualiRS is ready.";
+        statusBarItem.text = "$(search) qualirs";
+        statusBarItem.tooltip = "qualirs is ready.";
     }
 }
 
@@ -483,6 +597,62 @@ function updateStatusVisibility(): void {
 
 function isRustDocument(document: vscode.TextDocument): boolean {
     return document.languageId === "rust" && document.uri.scheme === "file";
+}
+
+function findRustWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
+    return vscode.workspace.workspaceFolders?.find(isRustWorkspaceFolder);
+}
+
+function isRustWorkspaceFolder(workspaceFolder: vscode.WorkspaceFolder): boolean {
+    return fs.existsSync(path.join(workspaceFolder.uri.fsPath, "Cargo.toml"));
+}
+
+async function setPaused(paused: boolean): Promise<void> {
+    await getConfig().update("paused", paused, configurationTargetForPause());
+    if (paused) {
+        clearScheduledChecks();
+        diagnosticCollection.clear();
+        updateStatusText("paused");
+        outputChannel.appendLine("qualirs paused.");
+        void vscode.window.showInformationMessage("qualirs paused.");
+    } else {
+        updateStatusText(undefined);
+        outputChannel.appendLine("qualirs resumed.");
+        void vscode.window.showInformationMessage("qualirs resumed.");
+    }
+}
+
+function isPaused(): boolean {
+    return getConfig().get<boolean>("paused", false);
+}
+
+function configurationTargetForPause(): vscode.ConfigurationTarget {
+    return vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+}
+
+function clearScheduledChecks(): void {
+    for (const timer of timers.values()) {
+        clearTimeout(timer);
+    }
+    timers.clear();
+}
+
+function isWorkspaceDocument(document: vscode.TextDocument): boolean {
+    return vscode.workspace.getWorkspaceFolder(document.uri) !== undefined;
+}
+
+function isPathInsideOrEqual(candidatePath: string, rootPath: string): boolean {
+    const candidate = normalizePathForComparison(candidatePath);
+    const root = normalizePathForComparison(rootPath);
+    const relative = path.relative(root, candidate);
+    return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizePathForComparison(value: string): string {
+    const normalized = path.resolve(value);
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function getConfig(): vscode.WorkspaceConfiguration {
